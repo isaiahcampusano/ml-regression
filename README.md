@@ -1,6 +1,8 @@
 # ml-regression
 basic linear regression w larger data sets (stochastic gradient descent) -- account for overfitting and shi
 
+scikit supervised learning/regression link: https://scikit-learn.org/stable/supervised_learning.html
+
 I’ll craft a comprehensive handoff for an interactive web tool that teaches polynomial regression, stochastic gradient descent, and overfitting with a rich synthetic signal, clear loss curves, and a focused Learn tab. The app will use Vite + vanilla JS, be modular, and deploy to GitHub Pages.
 
 **Key design decisions based on your answers:**
