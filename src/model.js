@@ -1,54 +1,121 @@
 import { X_MAX } from './data.js';
 
-export const features = (x, degree) => {
-  const scaled = x / X_MAX;
-  const values = [1];
-  for (let k = 1; k <= degree; k += 1) values.push(values[k - 1] * scaled);
+export function polynomialFeatures(x, degree, scaleX = true) {
+  const scaled = scaleX ? x / X_MAX : x;
+  const values = new Float64Array(degree + 1);
+  values[0] = 1;
+  for (let index = 1; index <= degree; index += 1) values[index] = values[index - 1] * scaled;
   return values;
-};
+}
 
-export const predict = (weights, x) => features(x, weights.length - 1).reduce((sum, value, index) => sum + weights[index] * value, 0);
+export const features = polynomialFeatures;
 
-export function loss(xs, ys, weights, lambda = 0) {
+export function predict(weights, x) {
+  const row = polynomialFeatures(x, weights.length - 1);
+  let prediction = 0;
+  for (let index = 0; index < weights.length; index += 1) prediction += weights[index] * row[index];
+  return prediction;
+}
+
+export function computeLoss(xs, ys, weights, lambda = 0) {
   if (!xs.length) return 0;
-  let total = 0;
-  xs.forEach((x, index) => {
-    const error = predict(weights, x) - ys[index];
-    total += error * error;
-  });
-  const penalty = weights.slice(1).reduce((sum, weight) => sum + weight * weight, 0) * lambda / 2;
-  return total / xs.length + penalty;
+  let squaredError = 0;
+  for (let index = 0; index < xs.length; index += 1) {
+    const error = predict(weights, xs[index]) - ys[index];
+    squaredError += error * error;
+  }
+  let penalty = 0;
+  for (let index = 1; index < weights.length; index += 1) penalty += weights[index] ** 2;
+  return squaredError / xs.length + (lambda / 2) * penalty;
 }
 
-export function initializeWeights(degree) {
-  return Float64Array.from({ length: degree + 1 }, () => (Math.random() - 0.5) * 0.1);
+export const loss = computeLoss;
+
+export function initializeWeights(degree, random = Math.random) {
+  return Float64Array.from({ length: degree + 1 }, () => random() - 0.5);
 }
 
-export function sgdStep(xs, ys, weights, learningRate, lambda) {
+export function sgdStep(xs, ys, weights, learningRate, lambda = 0) {
+  if (!xs.length) return weights;
   const gradient = new Float64Array(weights.length);
-  xs.forEach((x, index) => {
-    const row = features(x, weights.length - 1);
-    const error = predict(weights, x) - ys[index];
-    row.forEach((value, degree) => { gradient[degree] += (2 / xs.length) * error * value; });
-  });
-  for (let degree = 1; degree < weights.length; degree += 1) gradient[degree] += lambda * weights[degree];
-  weights.forEach((_, index) => { weights[index] -= learningRate * gradient[index]; });
+  for (let rowIndex = 0; rowIndex < xs.length; rowIndex += 1) {
+    const row = polynomialFeatures(xs[rowIndex], weights.length - 1);
+    let prediction = 0;
+    for (let index = 0; index < weights.length; index += 1) prediction += weights[index] * row[index];
+    const error = prediction - ys[rowIndex];
+    for (let index = 0; index < weights.length; index += 1) gradient[index] += (2 / xs.length) * error * row[index];
+  }
+  for (let index = 1; index < weights.length; index += 1) gradient[index] += lambda * weights[index];
+  for (let index = 0; index < weights.length; index += 1) weights[index] -= learningRate * gradient[index];
+  return weights;
 }
 
-export function trainEpoch(state) {
-  const order = state.trainX.map((_, index) => index).sort(() => Math.random() - 0.5);
-  const batchSize = Math.min(state.batchSize, state.trainX.length);
+function fisherYates(indices) {
+  for (let index = indices.length - 1; index > 0; index -= 1) {
+    const swapIndex = Math.floor(Math.random() * (index + 1));
+    [indices[index], indices[swapIndex]] = [indices[swapIndex], indices[index]];
+  }
+}
+
+function hasOverfittingPattern(trainingLosses, validationLosses, windowSize = 5) {
+  if (trainingLosses.length < 21 || validationLosses.length < windowSize + 1) return false;
+  const start = validationLosses.length - windowSize - 1;
+  const validationRising = validationLosses.slice(start).every((value, index, values) => index === 0 || value > values[index - 1]);
+  const trainingFalling = trainingLosses.at(-1) < trainingLosses.at(-(windowSize + 1));
+  return validationRising && trainingFalling;
+}
+
+export function trainEpoch(state, onUpdate = () => {}) {
+  if (!state.trainX.length || !state.valX.length) return null;
+  const order = state.trainX.map((_, index) => index);
+  fisherYates(order);
+  const batchSize = Math.max(1, Math.min(state.batchSize, order.length));
+  const previousWeights = Float64Array.from(state.weights);
+
   for (let start = 0; start < order.length; start += batchSize) {
     const batch = order.slice(start, start + batchSize);
-    sgdStep(batch.map((index) => state.trainX[index]), batch.map((index) => state.trainY[index]), state.weights, state.learningRate, state.lambda);
+    sgdStep(
+      batch.map((index) => state.trainX[index]),
+      batch.map((index) => state.trainY[index]),
+      state.weights,
+      state.learningRate,
+      state.lambda,
+    );
   }
-  const trainLoss = loss(state.trainX, state.trainY, state.weights, state.lambda);
-  const validationLoss = loss(state.valX, state.valY, state.weights, state.lambda);
+
+  const trainLoss = computeLoss(state.trainX, state.trainY, state.weights, state.lambda);
+  const validationLoss = computeLoss(state.valX, state.valY, state.weights, state.lambda);
+  const diverged = !Number.isFinite(trainLoss) || !Number.isFinite(validationLoss) || trainLoss > 1e6 || validationLoss > 1e6;
+
+  if (diverged) {
+    state.weights = previousWeights;
+    state.divergenceDetected = true;
+    state.isTraining = false;
+    onUpdate(state);
+    return { trainLoss, validationLoss };
+  }
+
   state.trainingLosses.push(trainLoss);
   state.validationLosses.push(validationLoss);
   state.epochs += 1;
-  const recent = state.validationLosses.slice(-5);
-  state.overfittingWarning = state.epochs > 20 && recent.length === 5 && recent.every((value, index) => index === 0 || value > recent[index - 1]) && trainLoss < state.trainingLosses[Math.max(0, state.trainingLosses.length - 6)];
-  state.divergenceDetected = !Number.isFinite(trainLoss) || !Number.isFinite(validationLoss) || trainLoss > 1e6 || validationLoss > 1e6;
+
+  if (validationLoss < state.bestValidationLoss - 1e-8) {
+    state.bestValidationLoss = validationLoss;
+    state.epochsWithoutImprovement = 0;
+  } else {
+    state.epochsWithoutImprovement += 1;
+  }
+
+  if (!state.overfittingWarning && hasOverfittingPattern(state.trainingLosses, state.validationLosses)) {
+    state.overfittingWarning = true;
+    state.overfittingEpoch = state.epochs - 4;
+  }
+
+  if (state.epochs >= 50 && state.epochsWithoutImprovement >= 30) {
+    state.earlyStopped = true;
+    state.isTraining = false;
+  }
+
+  onUpdate(state);
   return { trainLoss, validationLoss };
 }
